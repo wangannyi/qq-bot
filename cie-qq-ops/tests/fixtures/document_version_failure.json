@@ -1,0 +1,43 @@
+{
+  "fixture_origin": "synthetic",
+  "question": "开发文档不同版本的操作步骤不一致，如何确认？",
+  "sources": [
+    {
+      "id": "synthetic",
+      "path": "software/SDK/buildroot/k3_buildroot/source.md",
+      "title": "合成测试章节",
+      "heading": "合成测试章节",
+      "content": "本文档介绍 SDK 源码的开发环境、下载和编译方式。\n合成版本清单说明：manifests 仓库的 main 分支定义了不同版本的 `manifest.xml`，xml 文件指定了各仓库的路径和分支。",
+      "page_url": "https://example.invalid/docs/software/SDK/buildroot/k3_buildroot/source.md",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    },
+    {
+      "id": "synthetic",
+      "path": "software/SDK/buildroot/k1_buildroot/camera/camera_development_guide.md",
+      "title": "合成测试章节",
+      "heading": "合成测试章节",
+      "content": "另一篇合成示例，未给出文档版本映射。",
+      "page_url": "https://example.invalid/docs/software/SDK/buildroot/k1_buildroot/camera/camera_development_guide.md",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    }
+  ],
+  "structured_answer": {
+    "status": "answered",
+    "conclusion": {
+      "text": "所有文档版本都能根据源码清单确定。",
+      "command": "",
+      "evidence": [
+        {
+          "source_id": 0,
+          "quote": "本文档介绍 SDK 源码的开发环境、下载和编译方式。"
+        }
+      ]
+    },
+    "points": [],
+    "follow_up": ""
+  }
+}

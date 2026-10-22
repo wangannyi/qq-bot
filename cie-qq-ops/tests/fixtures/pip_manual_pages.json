@@ -1,0 +1,5 @@
+{
+  "https://pip.pypa.io/en/stable/user_guide/": "<main><p>Synthetic marker: python -m pip executes pip using the Python interpreter selected for this example.</p></main>",
+  "https://docs.astral.sh/uv/pip/compatibility/": "<main><p>Fixture: uv does not read configuration files like pip.conf or PIP_INDEX_URL.</p><p>Instead, uv supports its own environment variables such as UV_INDEX_URL; this synthetic example names uv.toml and a [tool.uv.pip] section of pyproject.toml.</p></main>",
+  "https://pip.pypa.io/en/stable/cli/pip_config/": "<main><p>Synthetic list command: List the active configuration.</p><p>Synthetic debug command: List the configuration files and values.</p></main>"
+}

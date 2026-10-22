@@ -1,0 +1,1501 @@
+diff --git a/gateway/platforms/qqbot/__init__.py b/gateway/platforms/qqbot/__init__.py
+index d755ec48d..93f056e23 100644
+--- a/gateway/platforms/qqbot/__init__.py
++++ b/gateway/platforms/qqbot/__init__.py
+@@ -49,6 +49,7 @@ from .keyboards import (  # noqa: F401
+     InteractionEvent,
+     build_approval_keyboard,
+     build_approval_text,
++    build_link_keyboard,
+     build_update_prompt_keyboard,
+     parse_approval_button_data,
+     parse_interaction_event,
+@@ -84,6 +85,7 @@ __all__ = [
+     "InteractionEvent",
+     "build_approval_keyboard",
+     "build_approval_text",
++    "build_link_keyboard",
+     "build_update_prompt_keyboard",
+     "parse_approval_button_data",
+     "parse_interaction_event",
+diff --git a/gateway/platforms/qqbot/adapter.py b/gateway/platforms/qqbot/adapter.py
+index 5447d99d9..5a2951627 100644
+--- a/gateway/platforms/qqbot/adapter.py
++++ b/gateway/platforms/qqbot/adapter.py
+@@ -37,6 +37,7 @@ import json
+ import logging
+ import mimetypes
+ import os
++import re
+ import time
+ import uuid
+ from datetime import datetime, timezone
+@@ -75,6 +76,32 @@ from gateway.platforms.helpers import strip_markdown
+ logger = logging.getLogger(__name__)
+ 
+ 
++_DAILY_SUMMARY_TRIGGERS = frozenset({
++    "今日问题汇总",
++    "今天问题汇总",
++    "今日汇总",
++    "问题汇总",
++})
++
++
++def _rewrite_plain_summary_command(content: str) -> str:
++    """Map natural-language daily-summary requests to the local quick command."""
++    normalized = re.sub(r"[\s，。！？!?、,.：:；;~～]+$", "", content.strip())
++    compact = re.sub(r"\s+", "", normalized)
++    is_fuzzy_summary = (
++        len(compact) <= 12
++        and ("今日" in compact or "今天" in compact)
++        and "汇总" in compact
++        and "问" in compact
++        and "题" in compact
++    )
++    return (
++        "/daily"
++        if normalized in _DAILY_SUMMARY_TRIGGERS or is_fuzzy_summary
++        else content
++    )
++
++
+ class QQCloseError(Exception):
+     """Raised when QQ WebSocket closes with a specific code.
+ 
+@@ -98,6 +125,7 @@ from gateway.platforms.qqbot.constants import (
+     DEFAULT_API_TIMEOUT,
+     FILE_UPLOAD_TIMEOUT,
+     CONNECT_TIMEOUT_SECONDS,
++    WS_CLOSE_TIMEOUT_SECONDS,
+     RECONNECT_BACKOFF,
+     MAX_RECONNECT_ATTEMPTS,
+     RATE_LIMIT_DELAY,
+@@ -159,6 +187,8 @@ class QQAdapter(BasePlatformAdapter):
+     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
+     _TYPING_INPUT_SECONDS = 60  # input_notify duration reported to QQ
+     _TYPING_DEBOUNCE_SECONDS = 50  # refresh before it expires
++    _SUPERVISOR_INTERVAL_SECONDS = 15.0
++    _STALE_GATEWAY_MIN_SECONDS = 90.0
+ 
+     @property
+     def _log_tag(self) -> str:
+@@ -195,7 +225,13 @@ class QQAdapter(BasePlatformAdapter):
+     @property
+     def is_connected(self) -> bool:
+         """Return True only when the QQ WebSocket transport is usable."""
+-        return bool(self._running and self._ws and not self._ws.closed)
++        return bool(
++            self._running
++            and self._ws
++            and not self._ws.closed
++            and self._listen_task
++            and not self._listen_task.done()
++        )
+ 
+     def __init__(self, config: PlatformConfig):
+         super().__init__(config, Platform.QQBOT)
+@@ -206,6 +242,7 @@ class QQAdapter(BasePlatformAdapter):
+             extra.get("client_secret") or os.getenv("QQ_CLIENT_SECRET", "")
+         ).strip()
+         self._markdown_support = bool(extra.get("markdown_support", True))
++        self._compact_mobile = bool(extra.get("compact_mobile", False))
+ 
+         # Auth/ACL policies
+         self._dm_policy = str(extra.get("dm_policy", "pairing")).strip().lower()
+@@ -217,13 +254,29 @@ class QQAdapter(BasePlatformAdapter):
+             extra.get("group_allow_from") or extra.get("groupAllowFrom")
+         )
+ 
++        # QQ's newer full-group-message mode delivers GROUP_MESSAGE_CREATE
++        # rather than GROUP_AT_MESSAGE_CREATE, including for messages that
++        # mention the bot.  Cache the bot identity so that we can process only
++        # those directed messages instead of replying to every group message.
++        self._bot_user_id = str(
++            extra.get("bot_user_id") or extra.get("botUserId") or ""
++        ).strip()
++        self._bot_username = str(
++            extra.get("bot_username") or extra.get("botUsername") or ""
++        ).strip()
++
+         # Connection state
+         self._session: Optional[aiohttp.ClientSession] = None
+         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+         self._http_client: Optional[httpx.AsyncClient] = None
+         self._listen_task: Optional[asyncio.Task] = None
+         self._heartbeat_task: Optional[asyncio.Task] = None
++        self._supervisor_task: Optional[asyncio.Task] = None
+         self._heartbeat_interval: float = 30.0  # seconds, updated by Hello
++        self._last_gateway_frame_at: float = 0.0
++        self._last_heartbeat_sent_at: float = 0.0
++        self._last_heartbeat_ack_at: float = 0.0
++        self._heartbeat_send_failures: int = 0
+         self._session_id: Optional[str] = None
+         self._last_seq: Optional[int] = None
+         self._chat_type_map: Dict[str, str] = {}  # chat_id → "c2c"|"group"|"guild"|"dm"
+@@ -322,6 +375,11 @@ class QQAdapter(BasePlatformAdapter):
+             # 1. Get access token
+             await self._ensure_token()
+ 
++            # A missing identity is non-fatal: the classic group @ event does
++            # not need it, while the full-group mode will safely ignore
++            # undirected messages until identity lookup succeeds.
++            await self._load_bot_identity()
++
+             # 2. Get WebSocket gateway URL
+             gateway_url = await self._get_gateway_url()
+             logger.info("[%s] Gateway URL: %s", self._log_tag, gateway_url)
+@@ -332,6 +390,7 @@ class QQAdapter(BasePlatformAdapter):
+             # 4. Start listeners
+             self._listen_task = asyncio.create_task(self._listen_loop())
+             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
++            self._supervisor_task = asyncio.create_task(self._supervisor_loop())
+             self._mark_connected()
+             logger.info("[%s] Connected", self._log_tag)
+             return True
+@@ -348,6 +407,14 @@ class QQAdapter(BasePlatformAdapter):
+         self._running = False
+         self._mark_disconnected()
+ 
++        if self._supervisor_task:
++            self._supervisor_task.cancel()
++            try:
++                await self._supervisor_task
++            except asyncio.CancelledError:
++                pass
++            self._supervisor_task = None
++
+         if self._listen_task:
+             self._listen_task.cancel()
+             try:
+@@ -449,6 +516,54 @@ class QQAdapter(BasePlatformAdapter):
+             raise RuntimeError(f"QQ Bot gateway response missing url: {data}")
+         return url
+ 
++    async def _load_bot_identity(self) -> None:
++        """Load the bot OpenID once for safe full-group mention detection.
++
++        QQ's ``GROUP_MESSAGE_CREATE`` payload removes the @ prefix from
++        ``content``.  The remaining ``mentions`` list carries OpenIDs, so the
++        adapter must know its own OpenID to distinguish a real bot mention
++        from an unrelated group message.
++        """
++        if self._bot_user_id and self._bot_username:
++            return
++        if not self._http_client:
++            return
++
++        try:
++            token = await self._ensure_token()
++            response = await self._http_client.get(
++                f"{API_BASE}/users/@me",
++                headers={
++                    "Authorization": f"QQBot {token}",
++                    "User-Agent": build_user_agent(),
++                    "X-Union-Appid": self._app_id,
++                },
++                timeout=DEFAULT_API_TIMEOUT,
++            )
++            response.raise_for_status()
++            data = response.json()
++        except Exception as exc:
++            logger.warning(
++                "[%s] Could not load QQ bot identity for full-group messages: %s",
++                self._log_tag,
++                exc,
++            )
++            return
++
++        if not isinstance(data, dict):
++            logger.warning(
++                "[%s] QQ bot identity response was not an object",
++                self._log_tag,
++            )
++            return
++
++        self._bot_user_id = str(data.get("id") or self._bot_user_id).strip()
++        self._bot_username = str(
++            data.get("username") or self._bot_username
++        ).strip()
++        if self._bot_user_id:
++            logger.info("[%s] QQ bot identity loaded", self._log_tag)
++
+     # ------------------------------------------------------------------
+     # WebSocket lifecycle
+     # ------------------------------------------------------------------
+@@ -465,7 +580,14 @@ class QQAdapter(BasePlatformAdapter):
+ 
+         # Honor WSL proxy env for QQ WebSocket. Hermes upgrades overwrite this
+         # local patch, so QQ can regress to direct-connect timeouts after update.
+-        self._session = aiohttp.ClientSession(trust_env=True)
++        # A session timeout governs the HTTP/WebSocket handshake.  Passing a
++        # float directly to ``ws_connect(timeout=...)`` means ``ws_close`` in
++        # aiohttp, not connection timeout; that formerly made stale-socket
++        # recovery wait 20 seconds for a close handshake.
++        self._session = aiohttp.ClientSession(
++            trust_env=True,
++            timeout=aiohttp.ClientTimeout(sock_connect=CONNECT_TIMEOUT_SECONDS),
++        )
+         ws_proxy = (
+             os.getenv("WSS_PROXY")
+             or os.getenv("wss_proxy")
+@@ -479,9 +601,13 @@ class QQAdapter(BasePlatformAdapter):
+             headers={
+                 "User-Agent": build_user_agent(),
+             },
+-            timeout=CONNECT_TIMEOUT_SECONDS,
++            timeout=aiohttp.ClientWSTimeout(ws_close=WS_CLOSE_TIMEOUT_SECONDS),
+             proxy=ws_proxy,
+         )
++        self._last_gateway_frame_at = time.monotonic()
++        self._last_heartbeat_sent_at = 0.0
++        self._last_heartbeat_ack_at = 0.0
++        self._heartbeat_send_failures = 0
+         logger.info("[%s] WebSocket connected to %s", self._log_tag, gateway_url)
+ 
+     async def _listen_loop(self) -> None:
+@@ -698,6 +824,7 @@ class QQAdapter(BasePlatformAdapter):
+ 
+         while self._running and self._ws and not self._ws.closed:
+             msg = await self._ws.receive()
++            self._last_gateway_frame_at = time.monotonic()
+             if msg.type == aiohttp.WSMsgType.TEXT:
+                 payload = self._parse_json(msg.data)
+                 if payload:
+@@ -707,7 +834,11 @@ class QQAdapter(BasePlatformAdapter):
+                 pass
+             elif msg.type == aiohttp.WSMsgType.CLOSE:
+                 raise QQCloseError(msg.data, msg.extra)
+-            elif msg.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
++            elif msg.type in {
++                aiohttp.WSMsgType.CLOSING,
++                aiohttp.WSMsgType.CLOSED,
++                aiohttp.WSMsgType.ERROR,
++            }:
+                 raise RuntimeError("WebSocket closed")
+ 
+     async def _heartbeat_loop(self) -> None:
+@@ -724,11 +855,88 @@ class QQAdapter(BasePlatformAdapter):
+                 try:
+                     # d should be the latest sequence number received, or null
+                     await self._ws.send_json({"op": 1, "d": self._last_seq})
++                    self._last_heartbeat_sent_at = time.monotonic()
+                 except Exception as exc:
++                    self._heartbeat_send_failures += 1
+                     logger.debug("[%s] Heartbeat failed: %s", self._log_tag, exc)
+         except asyncio.CancelledError:
+             pass
+ 
++    def _gateway_health(self) -> dict:
++        """Bounded transport diagnostics, without message text or credentials."""
++        now = time.monotonic()
++
++        def age(stamp):
++            return round(max(0.0, now - stamp), 1) if stamp else None
++
++        return {
++            "frame_age": age(self._last_gateway_frame_at),
++            "heartbeat_sent_age": age(self._last_heartbeat_sent_at),
++            "heartbeat_ack_age": age(self._last_heartbeat_ack_at),
++            "heartbeat_send_failures": self._heartbeat_send_failures,
++            "heartbeat_interval": self._heartbeat_interval,
++            "receive_task_done": self._listen_task is None or self._listen_task.done(),
++            "heartbeat_task_done": self._heartbeat_task is None or self._heartbeat_task.done(),
++        }
++
++    async def _supervisor_loop(self) -> None:
++        """Repair silently-dead receive/heartbeat tasks and stale sockets.
++
++        A transport can remain TCP-established after its receive task has
++        exited, leaving QQ events queued in the kernel while the runtime still
++        reports the adapter as connected. Gateway heartbeats provide regular
++        inbound ACK frames, so a long frame silence is also a reliable signal
++        that the socket needs to be replaced.
++        """
++        try:
++            while self._running:
++                await asyncio.sleep(self._SUPERVISOR_INTERVAL_SECONDS)
++                if not self._running:
++                    return
++
++                if self._listen_task is None or self._listen_task.done():
++                    failure = None
++                    if self._listen_task is not None and not self._listen_task.cancelled():
++                        try:
++                            failure = self._listen_task.exception()
++                        except Exception as exc:
++                            failure = exc
++                    logger.warning(
++                        "[%s] Receive task stopped unexpectedly%s; restarting it",
++                        self._log_tag,
++                        f": {failure}" if failure else "",
++                    )
++                    self._listen_task = asyncio.create_task(self._listen_loop())
++
++                if self._heartbeat_task is None or self._heartbeat_task.done():
++                    logger.warning(
++                        "[%s] Heartbeat task stopped unexpectedly; restarting it",
++                        self._log_tag,
++                    )
++                    self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
++
++                stale_after = max(
++                    self._STALE_GATEWAY_MIN_SECONDS,
++                    self._heartbeat_interval * 3,
++                )
++                silence = time.monotonic() - self._last_gateway_frame_at
++                if (
++                    self._ws
++                    and not self._ws.closed
++                    and self._last_gateway_frame_at > 0
++                    and silence > stale_after
++                ):
++                    logger.warning(
++                        "[%s] No gateway frame for %.1fs; forcing reconnect; health=%s",
++                        self._log_tag,
++                        silence,
++                        self._gateway_health(),
++                    )
++                    self._last_gateway_frame_at = time.monotonic()
++                    await self._ws.close()
++        except asyncio.CancelledError:
++            pass
++
+     async def _send_identify(self) -> None:
+         """Send op 2 Identify to authenticate the WebSocket connection.
+ 
+@@ -841,8 +1049,18 @@ class QQAdapter(BasePlatformAdapter):
+                 self._create_task(self._send_identify())
+             return
+ 
+-        # op 0 = Dispatch
++        # op 0 = Dispatch.  Keep a compact trace of every non-lifecycle
++        # dispatch at INFO level.  QQ does not replay missed group messages,
++        # so this is the only reliable way to distinguish an upstream event
++        # delivery problem from a later ACL or agent-pipeline rejection.
+         if op == 0 and t:
++            if t not in {"READY", "RESUMED"}:
++                logger.info(
++                    "[%s] QQ dispatch received: type=%s seq=%s",
++                    self._log_tag,
++                    t,
++                    s,
++                )
+             if t == "READY":
+                 self._handle_ready(d)
+             elif t == "RESUMED":
+@@ -850,6 +1068,7 @@ class QQAdapter(BasePlatformAdapter):
+             elif t in {
+                     "C2C_MESSAGE_CREATE",
+                     "GROUP_AT_MESSAGE_CREATE",
++                    "GROUP_MESSAGE_CREATE",
+                     "DIRECT_MESSAGE_CREATE",
+                     "GUILD_MESSAGE_CREATE",
+                     "GUILD_AT_MESSAGE_CREATE",
+@@ -863,6 +1082,7 @@ class QQAdapter(BasePlatformAdapter):
+ 
+         # op 11 = Heartbeat ACK
+         if op == 11:
++            self._last_heartbeat_ack_at = time.monotonic()
+             return
+ 
+         # op 7 = Server Reconnect — server asks client to reconnect (e.g.
+@@ -932,12 +1152,17 @@ class QQAdapter(BasePlatformAdapter):
+     async def _on_message(self, event_type: str, d: Any) -> None:
+         """Process an inbound QQ Bot message event."""
+         if not isinstance(d, dict):
++            logger.warning(
++                "[%s] Ignoring QQ %s dispatch with a non-object payload",
++                self._log_tag,
++                event_type,
++            )
+             return
+ 
+         # Extract common fields
+         msg_id = str(d.get("id", ""))
+         if not msg_id or self._is_duplicate(msg_id):
+-            logger.debug(
++            logger.warning(
+                 "[%s] Duplicate or missing message id: %s", self._log_tag, msg_id
+             )
+             return
+@@ -945,12 +1170,28 @@ class QQAdapter(BasePlatformAdapter):
+         timestamp = str(d.get("timestamp", ""))
+         content = str(d.get("content", "")).strip()
+         author = d.get("author") if isinstance(d.get("author"), dict) else {}
++        logger.info(
++            "[%s] Inbound QQ message: type=%s id=%s group=%s author=%s chars=%d",
++            self._log_tag,
++            event_type,
++            msg_id,
++            str(d.get("group_openid", "")),
++            str(author.get("member_openid") or author.get("user_openid") or author.get("id") or ""),
++            len(content),
++        )
+ 
+         # Route by event type
+         if event_type == "C2C_MESSAGE_CREATE":
+             await self._handle_c2c_message(d, msg_id, content, author, timestamp)
+-        elif event_type in {"GROUP_AT_MESSAGE_CREATE",}:
+-            await self._handle_group_message(d, msg_id, content, author, timestamp)
++        elif event_type in {"GROUP_AT_MESSAGE_CREATE", "GROUP_MESSAGE_CREATE"}:
++            await self._handle_group_message(
++                d,
++                msg_id,
++                content,
++                author,
++                timestamp,
++                require_bot_mention=(event_type == "GROUP_MESSAGE_CREATE"),
++            )
+         elif event_type in {"GUILD_MESSAGE_CREATE", "GUILD_AT_MESSAGE_CREATE"}:
+             await self._handle_guild_message(d, msg_id, content, author, timestamp)
+         elif event_type == "DIRECT_MESSAGE_CREATE":
+@@ -1225,7 +1466,7 @@ class QQAdapter(BasePlatformAdapter):
+         if not self._is_dm_intake_allowed(user_openid):
+             return
+ 
+-        text = content
++        text = _rewrite_plain_summary_command(content)
+         attachments_raw = d.get("attachments")
+         logger.info(
+             "[%s] C2C message: id=%s content=%r attachments=%s",
+@@ -1312,18 +1553,45 @@ class QQAdapter(BasePlatformAdapter):
+             content: str,
+             author: Dict[str, Any],
+             timestamp: str,
++            require_bot_mention: bool = False,
+     ) -> None:
+-        """Handle a group @-message event."""
++        """Handle a group @-message or a full-group-message event."""
+         group_openid = str(d.get("group_openid", ""))
+         if not group_openid:
+             return
+-        if not self._is_group_allowed(
+-                group_openid, str(author.get("member_openid", ""))
+-        ):
++        member_openid = str(author.get("member_openid", ""))
++        if not self._is_group_allowed(group_openid, member_openid):
++            logger.warning(
++                "[%s] Group @ blocked by ACL: group=%s member=%s policy=%s allowlist_entries=%d",
++                self._log_tag,
++                group_openid,
++                member_openid,
++                self._group_policy,
++                len(self._group_allow_from),
++            )
++            return
++        logger.info(
++            "[%s] Group message accepted by ACL: group=%s member=%s",
++            self._log_tag,
++            group_openid,
++            member_openid,
++        )
++
++        if require_bot_mention and not self._is_bot_mentioned(d, content):
++            mentions = d.get("mentions")
++            mention_count = len(mentions) if isinstance(mentions, list) else 0
++            logger.info(
++                "[%s] Full group message ignored because it does not mention this bot: "
++                "group=%s member=%s mentions=%d",
++                self._log_tag,
++                group_openid,
++                member_openid,
++                mention_count,
++            )
+             return
+ 
+         # Strip the @bot mention prefix from content
+-        text = self._strip_at_mention(content)
++        text = _rewrite_plain_summary_command(self._strip_at_mention(content))
+         att_result = await self._process_attachments(d.get("attachments"))
+         image_urls = att_result["image_urls"]
+         image_media_types = att_result["image_media_types"]
+@@ -2473,6 +2741,7 @@ class QQAdapter(BasePlatformAdapter):
+             chat_id: str,
+             content: str,
+             reply_to: Optional[str] = None,
++            keyboard: Optional[InlineKeyboard] = None,
+     ) -> SendResult:
+         """Send a single chunk with retry + exponential backoff."""
+         last_exc: Optional[Exception] = None
+@@ -2481,9 +2750,13 @@ class QQAdapter(BasePlatformAdapter):
+         for attempt in range(3):
+             try:
+                 if chat_type == "c2c":
+-                    return await self._send_c2c_text(chat_id, content, reply_to)
++                    return await self._send_c2c_text(
++                        chat_id, content, reply_to, keyboard=keyboard,
++                    )
+                 elif chat_type == "group":
+-                    return await self._send_group_text(chat_id, content, reply_to)
++                    return await self._send_group_text(
++                        chat_id, content, reply_to, keyboard=keyboard,
++                    )
+                 elif chat_type == "guild":
+                     return await self._send_guild_text(chat_id, content, reply_to)
+                 else:
+@@ -3116,11 +3389,15 @@ class QQAdapter(BasePlatformAdapter):
+     def format_message(self, content: str) -> str:
+         """Format message for QQ.
+ 
+-        When markdown_support is enabled, content is sent as-is (QQ renders it).
+-        When disabled, strip markdown via shared helper (same as BlueBubbles/SMS).
++        When Markdown support is enabled, normalize spacing and standalone
++        section labels to QQ's supported Markdown subset. Otherwise Markdown
++        syntax is stripped for plain-text delivery.
+         """
+         if self._markdown_support:
+-            return content
++            from .mobile_format import format_qq_markdown
++            return format_qq_markdown(
++                content, compact_mobile=self._compact_mobile
++            )
+         return strip_markdown(content)
+ 
+     # ------------------------------------------------------------------
+@@ -3197,6 +3474,48 @@ class QQAdapter(BasePlatformAdapter):
+             return True
+         return False
+ 
++    def _is_bot_mentioned(self, d: Dict[str, Any], content: str) -> bool:
++        """Return whether a full-group event explicitly targets this bot.
++
++        ``GROUP_MESSAGE_CREATE`` carries a ``mentions`` list and removes the
++        textual @ prefix.  Compare OpenIDs first; the app ID and username are
++        conservative compatibility fallbacks for older payload variants.
++        """
++        target_ids = {
++            value.casefold()
++            for value in (self._bot_user_id, self._app_id)
++            if value
++        }
++        target_username = self._bot_username.casefold()
++        mentions = d.get("mentions")
++        if isinstance(mentions, list):
++            for mention in mentions:
++                if not isinstance(mention, dict):
++                    continue
++                mention_ids = {
++                    str(mention.get(key, "")).strip().casefold()
++                    for key in ("id", "user_openid", "member_openid")
++                }
++                if target_ids.intersection(mention_ids):
++                    return True
++                if (
++                    target_username
++                    and bool(mention.get("bot"))
++                    and str(mention.get("username", "")).strip().casefold()
++                    == target_username
++                ):
++                    return True
++
++        # Some old clients send a literal mention but omit structured mentions.
++        # Require an explicit @ so ordinary discussion of the bot's name never
++        # turns into an unsolicited response.
++        normalized_content = str(content or "").casefold()
++        return any(
++            f"@{identifier.casefold()}" in normalized_content
++            for identifier in (self._bot_username, self._app_id)
++            if identifier
++        )
++
+     @staticmethod
+     def _entry_matches(entries: List[str], target: str) -> bool:
+         normalized_target = str(target).strip().lower()
+diff --git a/gateway/platforms/qqbot/constants.py b/gateway/platforms/qqbot/constants.py
+index ddae3c133..82f297577 100644
+--- a/gateway/platforms/qqbot/constants.py
++++ b/gateway/platforms/qqbot/constants.py
+@@ -37,6 +37,10 @@ QR_URL_TEMPLATE = (
+ DEFAULT_API_TIMEOUT = 30.0
+ FILE_UPLOAD_TIMEOUT = 120.0
+ CONNECT_TIMEOUT_SECONDS = 20.0
++# ``aiohttp.ws_connect(timeout=...)`` controls the WebSocket *close* handshake,
++# not the TCP connection attempt.  Keep that recovery path short so a stale
++# gateway never creates a long no-receive window while waiting for peer close.
++WS_CLOSE_TIMEOUT_SECONDS = 2.0
+ 
+ RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
+ MAX_RECONNECT_ATTEMPTS = 100
+diff --git a/gateway/platforms/qqbot/keyboards.py b/gateway/platforms/qqbot/keyboards.py
+index 9c1afbbfa..a77cbd4db 100644
+--- a/gateway/platforms/qqbot/keyboards.py
++++ b/gateway/platforms/qqbot/keyboards.py
+@@ -33,6 +33,7 @@ import logging
+ import re
+ from dataclasses import dataclass, field
+ from typing import Any, Awaitable, Callable, Dict, List, Optional
++from urllib.parse import quote
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -67,8 +68,9 @@ class KeyboardButtonPermission:
+ class KeyboardButtonAction:
+     """What happens when the button is clicked.
+ 
+-    :param type: ``1`` (Callback — triggers ``INTERACTION_CREATE``) or
+-        ``2`` (Link — opens a URL).
++    :param type: ``0`` (Link — opens a URL), ``1`` (Callback — triggers
++        ``INTERACTION_CREATE``), or ``2`` (Command — inserts data into the
++        input box).
+     :param data: Payload delivered in ``data.resolved.button_data`` when
+         ``type=1``.
+     :param permission: :class:`KeyboardButtonPermission`.
+@@ -80,6 +82,7 @@ class KeyboardButtonAction:
+         default_factory=KeyboardButtonPermission
+     )
+     click_limit: int = 1
++    unsupport_tips: str = "当前 QQ 版本不支持此按钮"
+ 
+     def to_dict(self) -> Dict[str, Any]:
+         return {
+@@ -87,6 +90,7 @@ class KeyboardButtonAction:
+             "data": self.data,
+             "permission": self.permission.to_dict(),
+             "click_limit": self.click_limit,
++            "unsupport_tips": self.unsupport_tips,
+         }
+ 
+ 
+@@ -259,6 +263,30 @@ def build_update_prompt_keyboard() -> InlineKeyboard:
+     )
+ 
+ 
++def build_link_keyboard(label: str, url: str) -> InlineKeyboard:
++    """Build a one-button keyboard that opens *url* in the QQ client."""
++    button_label = (label or "查看官方文档").strip()[:20]
++    encoded_url = quote(url.strip(), safe=":/?&=#%+,-._~")
++    return InlineKeyboard(
++        content=KeyboardContent(
++            rows=[
++                KeyboardRow(buttons=[
++                    KeyboardButton(
++                        id="source_link",
++                        render_data=KeyboardButtonRenderData(
++                            label=button_label,
++                            visited_label=button_label,
++                            style=1,
++                        ),
++                        action=KeyboardButtonAction(type=0, data=encoded_url),
++                        group_id="source_link",
++                    )
++                ])
++            ]
++        )
++    )
++
++
+ # ── ApprovalRequest + text builder ───────────────────────────────────
+ 
+ @dataclass
+diff --git a/tests/gateway/test_qqbot.py b/tests/gateway/test_qqbot.py
+index 562db5719..991c3d8bb 100644
+--- a/tests/gateway/test_qqbot.py
++++ b/tests/gateway/test_qqbot.py
+@@ -2,6 +2,7 @@
+ 
+ import asyncio
+ import os
++import time
+ from types import SimpleNamespace
+ from unittest import mock
+ 
+@@ -213,7 +214,12 @@ class TestVoiceAttachmentSSRFProtection:
+ class TestQQWebSocketProxy:
+     @pytest.mark.asyncio
+     async def test_open_ws_honors_proxy_env(self, monkeypatch):
++        import aiohttp
+         from gateway.platforms.qqbot import QQAdapter
++        from gateway.platforms.qqbot.constants import (
++            CONNECT_TIMEOUT_SECONDS,
++            WS_CLOSE_TIMEOUT_SECONDS,
++        )
+ 
+         for key in (
+             "WSS_PROXY",
+@@ -249,6 +255,17 @@ class TestQQWebSocketProxy:
+         assert seen_session_kwargs.get("trust_env") is True
+         assert seen_ws_kwargs.get("proxy") == "http://127.0.0.1:7897"
+ 
++        # TCP connection setup and WebSocket close need independent bounds:
++        # a stalled TCP dial must not consume the generic request timeout, and
++        # a stalled close must not hold up reconnect forever.
++        session_timeout = seen_session_kwargs.get("timeout")
++        assert isinstance(session_timeout, aiohttp.ClientTimeout)
++        assert session_timeout.sock_connect == CONNECT_TIMEOUT_SECONDS
++
++        ws_timeout = seen_ws_kwargs.get("timeout")
++        assert isinstance(ws_timeout, aiohttp.ClientWSTimeout)
++        assert ws_timeout.ws_close == WS_CLOSE_TIMEOUT_SECONDS
++
+ # ---------------------------------------------------------------------------
+ # _strip_at_mention
+ # ---------------------------------------------------------------------------
+@@ -344,6 +361,84 @@ class TestGroupAllowed:
+         adapter = self._make_adapter(app_id="a", client_secret="b")
+         assert adapter._is_dm_intake_allowed("any_user") is True
+ 
++
++# ---------------------------------------------------------------------------
++# Full-group message handling
++# ---------------------------------------------------------------------------
++
++class TestFullGroupMessageHandling:
++    def _make_adapter(self, **extra):
++        from gateway.platforms.qqbot import QQAdapter
++        defaults = {
++            "app_id": "app-1",
++            "client_secret": "secret",
++            "group_policy": "allowlist",
++            "group_allow_from": "group-1",
++            "bot_user_id": "bot-openid-1",
++            "bot_username": "spacemit-bot",
++        }
++        defaults.update(extra)
++        return QQAdapter(_make_config(**defaults))
++
++    @pytest.mark.asyncio
++    async def test_mentioned_full_group_message_is_forwarded(self):
++        adapter = self._make_adapter()
++        adapter.handle_message = mock.AsyncMock()
++        raw = {
++            "id": "full-group-mentioned",
++            "group_openid": "group-1",
++            # QQ removes the mention prefix in GROUP_MESSAGE_CREATE content.
++            "content": "model zoo包含哪些内容，在什么平台适用",
++            "author": {"member_openid": "member-1"},
++            "mentions": [{"id": "bot-openid-1", "bot": True}],
++        }
++
++        await adapter._on_message("GROUP_MESSAGE_CREATE", raw)
++
++        adapter.handle_message.assert_awaited_once()
++        event = adapter.handle_message.await_args.args[0]
++        assert event.source.chat_id == "group-1"
++        assert event.source.user_id == "member-1"
++        assert event.text == "model zoo包含哪些内容，在什么平台适用"
++
++    @pytest.mark.asyncio
++    async def test_unmentioned_full_group_message_is_not_forwarded(self):
++        adapter = self._make_adapter()
++        adapter.handle_message = mock.AsyncMock()
++        raw = {
++            "id": "full-group-ordinary",
++            "group_openid": "group-1",
++            "content": "大家下午好",
++            "author": {"member_openid": "member-1"},
++            "mentions": [],
++        }
++
++        await adapter._on_message("GROUP_MESSAGE_CREATE", raw)
++
++        adapter.handle_message.assert_not_awaited()
++
++    def test_literal_mention_is_a_compatibility_fallback(self):
++        adapter = self._make_adapter()
++        assert adapter._is_bot_mentioned(
++            {"mentions": []}, "@spacemit-bot model zoo包含哪些内容"
++        )
++        assert not adapter._is_bot_mentioned({"mentions": []}, "spacemit-bot上线了")
++
++    @pytest.mark.asyncio
++    async def test_identity_lookup_populates_openid_and_name(self):
++        adapter = self._make_adapter(bot_user_id="", bot_username="")
++        response = mock.Mock()
++        response.raise_for_status.return_value = None
++        response.json.return_value = {"id": "bot-openid-2", "username": "new-name"}
++        adapter._http_client = mock.AsyncMock()
++        adapter._http_client.get = mock.AsyncMock(return_value=response)
++        adapter._ensure_token = mock.AsyncMock(return_value="token")
++
++        await adapter._load_bot_identity()
++
++        assert adapter._bot_user_id == "bot-openid-2"
++        assert adapter._bot_username == "new-name"
++
+ # ---------------------------------------------------------------------------
+ # _resolve_stt_config
+ # ---------------------------------------------------------------------------
+@@ -480,6 +575,53 @@ class TestDispatchPayload:
+         adapter._dispatch_payload({"op": 0, "t": "SOME_EVENT", "s": 10, "d": {}})
+         assert adapter._last_seq == 10
+ 
++    @pytest.mark.asyncio
++    async def test_group_at_dispatch_reaches_message_handler(self):
++        """A group @ dispatch must enter the message pipeline unchanged."""
++        adapter = self._make_adapter(app_id="a", client_secret="b")
++        payload = {
++            "id": "message-1",
++            "group_openid": "group-1",
++            "content": "@bot model zoo包含哪些内容",
++            "author": {"member_openid": "member-1"},
++        }
++        handler = mock.AsyncMock()
++        adapter._on_message = handler
++
++        adapter._dispatch_payload({
++            "op": 0,
++            "t": "GROUP_AT_MESSAGE_CREATE",
++            "s": 11,
++            "d": payload,
++        })
++        await asyncio.sleep(0)
++
++        handler.assert_awaited_once_with("GROUP_AT_MESSAGE_CREATE", payload)
++
++    @pytest.mark.asyncio
++    async def test_full_group_dispatch_reaches_message_handler(self):
++        """Full-group mode uses a distinct QQ dispatch event."""
++        adapter = self._make_adapter(app_id="a", client_secret="b")
++        payload = {
++            "id": "message-2",
++            "group_openid": "group-1",
++            "content": "model zoo包含哪些内容",
++            "author": {"member_openid": "member-1"},
++            "mentions": [{"id": "bot-1", "bot": True}],
++        }
++        handler = mock.AsyncMock()
++        adapter._on_message = handler
++
++        adapter._dispatch_payload({
++            "op": 0,
++            "t": "GROUP_MESSAGE_CREATE",
++            "s": 12,
++            "d": payload,
++        })
++        await asyncio.sleep(0)
++
++        handler.assert_awaited_once_with("GROUP_MESSAGE_CREATE", payload)
++
+ 
+ # ---------------------------------------------------------------------------
+ # READY / RESUMED handling
+@@ -579,6 +721,92 @@ class TestBuildTextBody:
+         assert body.get("message_reference", {}).get("message_id") == "msg_123"
+ 
+ 
++class TestFormatMessageLinks:
++    def _make_adapter(self, **extra):
++        from gateway.platforms.qqbot import QQAdapter
++        return QQAdapter(_make_config(**extra))
++
++    def test_format_message_does_not_expand_link_to_long_bare_url(self):
++        adapter = self._make_adapter(app_id="a", client_secret="b", markdown_support=True)
++
++        formatted = adapter.format_message(
++            "[部署指南](https://example.test/竞赛/部署.md)"
++        )
++
++        assert formatted == "[部署指南](https://example.test/竞赛/部署.md)"
++
++    def test_standalone_bold_label_becomes_qq_heading(self):
++        adapter = self._make_adapter(app_id="a", client_secret="b", markdown_support=True)
++
++        assert adapter.format_message("**解决方式**") == "## 解决方式"
++
++    def test_escalation_format_uses_numbered_list_with_blank_line(self):
++        adapter = self._make_adapter(app_id="a", client_secret="b", markdown_support=True)
++
++        formatted = adapter.format_message(
++            "**需要人工确认**\n"
++            "- 已确认：官方资料未说明测试集名称。\n"
++            "- 待确认：请赛事组织方确认数据集来源。"
++        )
++
++        assert formatted == (
++            "## 需要人工确认\n\n"
++            "1. 已确认：官方资料未说明测试集名称。\n"
++            "2. 待确认：请赛事组织方确认数据集来源。"
++        )
++
++
++class TestPlainSummaryCommand:
++    def test_exact_summary_request_maps_to_quick_command(self):
++        from gateway.platforms.qqbot.adapter import _rewrite_plain_summary_command
++
++        assert _rewrite_plain_summary_command("今日问题汇总") == "/daily"
++        assert _rewrite_plain_summary_command("今天问题汇总？") == "/daily"
++        assert _rewrite_plain_summary_command("今日问汇总题") == "/daily"
++
++    def test_unrelated_question_is_unchanged(self):
++        from gateway.platforms.qqbot.adapter import _rewrite_plain_summary_command
++
++        question = "K1 如何运行 llama-bench？"
++        assert _rewrite_plain_summary_command(question) == question
++
++
++class TestAnswerHyperlink:
++    def _make_adapter(self):
++        from gateway.platforms.qqbot import QQAdapter
++        adapter = QQAdapter(_make_config(
++            app_id="a", client_secret="b", markdown_support=True,
++        ))
++        adapter._running = True
++        adapter._ws = SimpleNamespace(closed=False)
++        adapter._listen_task = SimpleNamespace(done=lambda: False)
++        return adapter
++
++    @pytest.mark.asyncio
++    async def test_send_keeps_markdown_hyperlink_in_body(self):
++        adapter = self._make_adapter()
++        sent = {}
++
++        async def fake_api_request(method, path, body):
++            sent.update({"method": method, "path": path, "body": body})
++            return {"id": "out-1"}
++
++        adapter._api_request = fake_api_request
++        result = await adapter.send(
++            "student",
++            "解决方式：按指南操作。\n\n"
++            "[大模型部署指南](https://example.test/竞赛/部署.md)",
++        )
++
++        assert result.success
++        body = sent["body"]
++        assert body["markdown"]["content"] == (
++            "解决方式：按指南操作。\n\n"
++            "[大模型部署指南](https://example.test/竞赛/部署.md)"
++        )
++        assert "keyboard" not in body
++
++
+ # ---------------------------------------------------------------------------
+ # _wait_for_reconnection / send reconnection wait
+ # ---------------------------------------------------------------------------
+@@ -612,6 +840,7 @@ class TestWaitForReconnection:
+             await asyncio.sleep(0.3)
+             adapter._running = True
+             adapter._ws = SimpleNamespace(closed=False)
++            adapter._listen_task = SimpleNamespace(done=lambda: False)
+ 
+         asyncio.get_event_loop().create_task(reconnect_after_delay())
+ 
+@@ -638,6 +867,7 @@ class TestWaitForReconnection:
+         adapter = self._make_adapter(app_id="a", client_secret="b")
+         adapter._running = True
+         adapter._ws = SimpleNamespace(closed=False)
++        adapter._listen_task = SimpleNamespace(done=lambda: False)
+         adapter._http_client = mock.MagicMock()
+ 
+         async def fake_api_request(*args, **kwargs):
+@@ -663,6 +893,66 @@ class TestWaitForReconnection:
+         assert "Not connected" in result.error
+ 
+ 
++class TestConnectionSupervisor:
++    def _make_adapter(self):
++        from gateway.platforms.qqbot import QQAdapter
++        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
++        adapter._SUPERVISOR_INTERVAL_SECONDS = 0.01
++        adapter._STALE_GATEWAY_MIN_SECONDS = 0.03
++        adapter._heartbeat_interval = 0.01
++        return adapter
++
++    @pytest.mark.asyncio
++    async def test_restarts_a_finished_receive_task(self):
++        adapter = self._make_adapter()
++        adapter._running = True
++        adapter._ws = SimpleNamespace(closed=False)
++        adapter._last_gateway_frame_at = time.monotonic()
++        adapter._listen_task = asyncio.create_task(asyncio.sleep(0))
++        await adapter._listen_task
++        adapter._heartbeat_task = SimpleNamespace(done=lambda: False)
++
++        restarted = asyncio.Event()
++
++        async def replacement_listener():
++            restarted.set()
++            await asyncio.Event().wait()
++
++        adapter._listen_loop = replacement_listener
++        supervisor = asyncio.create_task(adapter._supervisor_loop())
++        await asyncio.wait_for(restarted.wait(), timeout=0.5)
++
++        adapter._running = False
++        supervisor.cancel()
++        adapter._listen_task.cancel()
++        await asyncio.gather(supervisor, adapter._listen_task, return_exceptions=True)
++
++    @pytest.mark.asyncio
++    async def test_closes_a_stale_websocket(self):
++        adapter = self._make_adapter()
++        adapter._running = True
++        closed = asyncio.Event()
++
++        class FakeWebSocket:
++            def __init__(self):
++                self.closed = False
++
++            async def close(self):
++                self.closed = True
++                closed.set()
++
++        adapter._ws = FakeWebSocket()
++        adapter._last_gateway_frame_at = time.monotonic() - 1
++        adapter._listen_task = SimpleNamespace(done=lambda: False)
++        adapter._heartbeat_task = SimpleNamespace(done=lambda: False)
++
++        supervisor = asyncio.create_task(adapter._supervisor_loop())
++        await asyncio.wait_for(closed.wait(), timeout=0.5)
++
++        adapter._running = False
++        supervisor.cancel()
++        await asyncio.gather(supervisor, return_exceptions=True)
++
+ # ---------------------------------------------------------------------------
+ # ChunkedUploader
+ # ---------------------------------------------------------------------------
+@@ -2254,3 +2544,39 @@ class TestReadEventsClosedWsGuard:
+         adapter._ws = None
+         with pytest.raises(RuntimeError):
+             asyncio.run(adapter._read_events())
++
++    def test_read_events_raises_immediately_when_ws_is_closing(self):
++        """CLOSING is a terminal gateway state, not a frame to ignore.
++
++        If it were ignored, _read_events would keep awaiting the same socket
++        and delay the reconnect loop.  The second receive deliberately fails
++        so this also proves the first CLOSING frame took the exception path.
++        """
++        import aiohttp
++        from gateway.platforms.qqbot.adapter import QQCloseError
++
++        adapter = self._make_adapter()
++        adapter._running = True
++
++        class ClosingWebSocket:
++            closed = False
++
++            def __init__(self):
++                self.receive_calls = 0
++
++            async def receive(self):
++                self.receive_calls += 1
++                if self.receive_calls == 1:
++                    return SimpleNamespace(
++                        type=aiohttp.WSMsgType.CLOSING,
++                        data=None,
++                        extra="gateway closing",
++                    )
++                raise AssertionError("CLOSING frame must trigger reconnect before another receive")
++
++        ws = ClosingWebSocket()
++        adapter._ws = ws
++
++        with pytest.raises((RuntimeError, QQCloseError)):
++            asyncio.run(adapter._read_events())
++        assert ws.receive_calls == 1
+diff --git a/tests/tools/test_send_message_target_parse.py b/tests/tools/test_send_message_target_parse.py
+index 6b1226580..4d3d66e25 100644
+--- a/tests/tools/test_send_message_target_parse.py
++++ b/tests/tools/test_send_message_target_parse.py
+@@ -55,6 +55,20 @@ def test_whatsapp_friendly_name_still_uses_directory_resolution() -> None:
+     assert _parse_target_ref("whatsapp", "general")[2] is False
+ 
+ 
++def test_qqbot_openid_target_is_explicit() -> None:
++    chat_id, thread_id, is_explicit = _parse_target_ref(
++        "qqbot", "A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"
++    )
++
++    assert chat_id == "A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"
++    assert thread_id is None
++    assert is_explicit is True
++
++
++def test_qqbot_friendly_name_still_uses_directory_resolution() -> None:
++    assert _parse_target_ref("qqbot", "CIE 技术支持讨论组")[2] is False
++
++
+ def test_send_message_routes_whatsapp_group_jid_without_home_fallback() -> None:
+     whatsapp_cfg = SimpleNamespace(enabled=True, token=None, extra={"api_url": "http://bridge"})
+     config = SimpleNamespace(
+@@ -90,3 +104,39 @@ def test_send_message_routes_whatsapp_group_jid_without_home_fallback() -> None:
+         force_document=False,
+     )
+ 
++
++def test_send_message_routes_qqbot_openid_without_home_fallback() -> None:
++    qqbot_cfg = SimpleNamespace(enabled=True, token=None, extra={})
++    config = SimpleNamespace(
++        platforms={Platform.QQBOT: qqbot_cfg},
++        get_home_channel=lambda _platform: SimpleNamespace(chat_id="B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2"),
++    )
++    group_openid = "A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"
++
++    with patch("gateway.config.load_gateway_config", return_value=config), \
++         patch("tools.interrupt.is_interrupted", return_value=False), \
++         patch("gateway.channel_directory.resolve_channel_name", side_effect=AssertionError("raw QQ OpenID should not resolve via directory")), \
++         patch("model_tools._run_async", side_effect=_run_async_immediately), \
++         patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
++         patch("gateway.mirror.mirror_to_session", return_value=True):
++        result = json.loads(
++            send_message_tool(
++                {
++                    "action": "send",
++                    "target": f"qqbot:{group_openid}",
++                    "message": "daily report target test",
++                }
++            )
++        )
++
++    assert result["success"] is True
++    assert "note" not in result
++    send_mock.assert_awaited_once_with(
++        Platform.QQBOT,
++        qqbot_cfg,
++        group_openid,
++        "daily report target test",
++        thread_id=None,
++        media_files=[],
++        force_document=False,
++    )
+diff --git a/tools/send_message_tool.py b/tools/send_message_tool.py
+index c143ea806..0db4d3596 100644
+--- a/tools/send_message_tool.py
++++ b/tools/send_message_tool.py
+@@ -31,6 +31,11 @@ _SLACK_TARGET_RE = re.compile(r"^\s*([CGDU][A-Z0-9]{8,})\s*$")
+ _SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
+ _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
+ _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
++# QQ Bot group/channel OpenIDs are opaque 32-character hexadecimal values.
++# They are valid native recipients, not human-friendly names: treating them as
++# names makes explicit ``qqbot:<openid>`` sends silently fall back to the
++# configured home channel.
++_QQBOT_OPENID_TARGET_RE = re.compile(r"^\s*([A-Fa-f0-9]{32})\s*$")
+ # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
+ _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
+ # Platforms that address recipients by phone number and accept E.164 format
+@@ -579,6 +584,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
+         if target_ref.strip().isdigit():
+             return f"group:{target_ref.strip()}", None, True
+         return None, None, False
++    if platform_name == "qqbot":
++        match = _QQBOT_OPENID_TARGET_RE.fullmatch(target_ref)
++        if match:
++            return match.group(1), None, True
+     if platform_name == "ntfy":
+         topic = target_ref.strip()
+         if topic:
+@@ -840,6 +849,22 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
+     else:
+         chunks = [message]
+ 
++    # QQ's direct-send path does not instantiate the live adapter.  Format
++    # here, before dispatch, so scheduled reports and ``send_message`` use
++    # precisely the same rich/legacy presentation policy as live replies.
++    if platform == Platform.QQBOT:
++        qq_extra = getattr(pconfig, "extra", {}) or {}
++        if bool(qq_extra.get("markdown_support", True)):
++            from gateway.platforms.qqbot.mobile_format import format_qq_markdown
++
++            chunks = [
++                format_qq_markdown(
++                    chunk,
++                    compact_mobile=bool(qq_extra.get("compact_mobile", False)),
++                )
++                for chunk in chunks
++            ]
++
+     # --- Telegram: special handling for media attachments ---
+     # _send_telegram now owns text chunking internally — it formats the full
+     # message (MarkdownV2/HTML) and then splits the *formatted* text on UTF-16
+@@ -1888,7 +1913,39 @@ async def _send_qqbot(pconfig, chat_id, message):
+                 "Authorization": f"QQBot {access_token}",
+                 "Content-Type": "application/json",
+             }
+-            payload = {"content": message[:4000], "msg_type": 0}
++            # Custom Markdown is now used for both compact and rich QQ
++            # delivery.  The API's Accept/User-Agent headers are transport
++            # requirements, not a property of the compact presentation mode.
++            from gateway.platforms.qqbot.utils import get_api_headers
++            headers.update(get_api_headers())
++            # Keep standalone sends consistent with the live QQ gateway.  QQ
++            # only parses links such as ``[label](url)`` when the message is
++            # sent as custom Markdown (msg_type=2); sending the same content as
++            # plain text leaves the Markdown source visible in the client.
++            if bool(extra.get("markdown_support", True)):
++                # ``_send_qqbot`` can also be called directly in tooling and
++                # tests, so apply the same idempotent formatter here as a
++                # final safeguard.  The normal router formats beforehand.
++                from gateway.platforms.qqbot.mobile_format import format_qq_markdown
++                message = format_qq_markdown(
++                    message,
++                    compact_mobile=bool(extra.get("compact_mobile", False)),
++                )
++                payload = {
++                    "markdown": {"content": message[:4000]},
++                    "msg_type": 2,
++                    # Match the live gateway payload. QQ uses this sequence to
++                    # identify a concrete outbound message and de-duplicate
++                    # retries; omitting it can make custom message fields fall
++                    # back to plain-text handling on some C2C paths.
++                    "msg_seq": int(time.time() * 1000) % 65536,
++                }
++            else:
++                payload = {
++                    "content": message[:4000],
++                    "msg_type": 0,
++                    "msg_seq": int(time.time() * 1000) % 65536,
++                }
+ 
+             # Try channel endpoint first (works for guild channels)
+             url = f"https://api.sgroup.qq.com/channels/{chat_id}/messages"
+diff --git a/gateway/platforms/qqbot/mobile_format.py b/gateway/platforms/qqbot/mobile_format.py
+new file mode 100644
+index 000000000..351a74c0a
+--- /dev/null
++++ b/gateway/platforms/qqbot/mobile_format.py
+@@ -0,0 +1,100 @@
++"""QQ Custom Markdown formatting helpers.
++
++``mobile_markdown`` is the legacy compact fallback for older clients.  The
++normal path uses ``normalize_qq_markdown`` instead, because current QQ C2C
++and group Custom Markdown supports headings, emphasis, lists and blockquotes.
++Keeping both formatters here makes live replies and standalone sends use the
++same formatting policy.
++"""
++import html
++import re
++from urllib.parse import quote, urlsplit, urlunsplit
++
++LINK = re.compile(r"(?<!!)\[([^\]\n]+)\]\((https?://[^\s<>]+)\)")
++
++
++def normalize_qq_markdown(content: str) -> str:
++    """Normalize model Markdown to the subset rendered reliably by QQ.
++
++    QQ expects a blank line before a list following normal prose.  Standalone
++    bold labels become short level-two headings and the support bot's two
++    escalation bullets become a numbered list.  This function deliberately
++    preserves supported Markdown rather than flattening it for mobile.
++    """
++    normalized: list[str] = []
++    escalation_number = {"已确认": 1, "待确认": 2}
++
++    for raw_line in str(content or "").splitlines():
++        line = raw_line.rstrip()
++        heading = re.fullmatch(r"\s*\*\*(.+?)\*\*\s*", line)
++        if heading:
++            line = f"## {heading.group(1).strip()}"
++
++        escalation = re.fullmatch(
++            r"\s*[-+*]\s*(已确认|待确认)\s*[：:]\s*(.*)", line
++        )
++        if escalation:
++            label, detail = escalation.groups()
++            line = f"{escalation_number[label]}. {label}：{detail.strip()}"
++
++        is_list_item = bool(re.match(r"\s*(?:[-+*]|\d+[.)])\s+", line))
++        previous = normalized[-1] if normalized else ""
++        previous_is_list = bool(
++            re.match(r"\s*(?:[-+*]|\d+[.)])\s+", previous)
++        )
++        if is_list_item and previous and not previous_is_list:
++            normalized.append("")
++        normalized.append(line)
++
++    return "\n".join(normalized)
++
++
++def format_qq_markdown(content: str, *, compact_mobile: bool = False) -> str:
++    """Apply the configured QQ presentation policy in one shared place."""
++    if compact_mobile:
++        return mobile_markdown(content)
++    return normalize_qq_markdown(content)
++
++
++def wire_url(url: str) -> str:
++    parts = urlsplit(html.unescape(url))
++    return urlunsplit((parts.scheme, parts.netloc.encode("idna").decode(),
++                       quote(parts.path, safe="/%:@-._~!$&'*+,;="),
++                       quote(parts.query, safe="%=&?/:@,+-._~!$'*;"),
++                       quote(parts.fragment, safe="%-._~")))
++
++
++def mobile_markdown(content: str) -> str:
++    saved: list[str] = []
++
++    def keep(value):
++        saved.append(value)
++        return f"\x00QQ{len(saved)-1}\x00"
++
++    def link(match):
++        label = re.sub(r"^[🔗\s]+", "", match[1]).strip()
++        label = re.sub(r"[*`_]+", "", label)
++        return keep(f"[🔗{label}]({wire_url(match[2])})")
++
++    # Protect code BEFORE matching links/Markdown inside it.
++    def code(match):
++        code_text = match[2].strip("\n")
++        if "\n" not in code_text and len(code_text) <= 180 and not any(c in code_text for c in "`*_[]<>\\"):
++            return keep(code_text)
++        return keep("（多行代码请查看文档；手机消息中不展开，避免复制不完整。）")
++
++    text = re.sub(r"(`{3,}|~{3,})[^\n]*\n(.*?)\n\1", code, str(content or ""), flags=re.S)
++    # A model cut off mid-fence must not send a half-command to a student.
++    text = re.sub(r"(?ms)^[ \t]*(?:`{3,}|~{3,}).*\Z", "（代码不完整，请查看文档或补充问题后再确认。）", text)
++    text = LINK.sub(link, text)
++    text = re.sub(r"`([^`\n]+)`", lambda m: keep(html.escape(m[1], quote=False)), text)
++    text = re.sub(r"(?m)^\s*#{1,6}\s+", "", text)
++    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
++    # Plain numbering is visible even on clients without Markdown list support.
++    text = re.sub(r"(?m)^\s*(\d+)[.)]\s+", r"\1、", text)
++    text = re.sub(r"(?m)^\s*[-+*]\s+", "• ", text)
++    text = re.sub(r"(?m)^\s*>\s?", "", text)
++    text = re.sub(r"\n{3,}", "\n\n", text).strip()
++    for i, value in enumerate(saved):
++        text = text.replace(f"\x00QQ{i}\x00", value)
++    return text
+diff --git a/tests/gateway/test_qq_mobile_format.py b/tests/gateway/test_qq_mobile_format.py
+new file mode 100644
+index 000000000..a38dbe24b
+--- /dev/null
++++ b/tests/gateway/test_qq_mobile_format.py
+@@ -0,0 +1,145 @@
++import re
++from unittest.mock import AsyncMock
++from urllib.parse import unquote
++
++import pytest
++from gateway.config import PlatformConfig
++from gateway.platforms.qqbot import QQAdapter
++from gateway.platforms.qqbot.mobile_format import (
++    format_qq_markdown,
++    mobile_markdown,
++    wire_url,
++)
++
++
++def adapter(**extras):
++    return QQAdapter(PlatformConfig(enabled=True, extra={"app_id": "test", "client_secret": "test", **extras}))
++
++
++def test_unicode_link_is_named_encoded_and_idempotent():
++    url = "https://www.spacemit.com/community/document/info?lang=zh&nodepath=competition/竞赛教程/a_b.md"
++    result = mobile_markdown(f"[开发者文档]({url})")
++    assert result.startswith("[🔗开发者文档](https://")
++    assert "竞赛" not in result and "%E7" in result
++    assert unquote(result.split("](")[1][:-1]) == url
++    assert mobile_markdown(result) == result
++
++
++def test_query_delimiters_and_existing_escapes_preserved():
++    url = "https://www.spacemit.com/community/info?a=x%26y&nodepath=路径/a%20b.md"
++    result = wire_url(url)
++    assert "x%26y&nodepath=" in result
++    assert "%2526" not in result
++
++
++def test_plain_steps_no_fragmented_inline_blocks():
++    result = mobile_markdown("## 解决方式\n\n1. 运行 `ollama list`。\n2. 查看文档。")
++    assert "1、运行 ollama list。" in result
++    assert "`" not in result and "##" not in result
++
++
++def test_complex_code_not_corrupted_into_a_partial_command():
++    result = mobile_markdown("```python\n# comment\nfor i in range(3):\n    print(i)\n```\n[说明](https://www.spacemit.com/community)")
++    assert "print(i)" not in result
++    assert "多行代码请查看文档" in result
++    assert "[🔗说明]" in result
++
++
++def test_truncated_code_is_not_sent_as_an_executable_fragment():
++    result = mobile_markdown("步骤\n```sh\nsudo apt install unfinished")
++    assert "```" not in result and "sudo apt" not in result
++    assert "代码不完整" in result
++
++
++@pytest.mark.asyncio
++async def test_standalone_send_uses_same_format(monkeypatch):
++    import httpx
++    from tools.send_message_tool import _send_qqbot
++    from types import SimpleNamespace
++    sent = []
++    class Client:
++        def __init__(self, **kwargs):
++            pass
++        async def __aenter__(self):
++            return self
++        async def __aexit__(self, *args):
++            pass
++        async def post(self, url, **kwargs):
++            if "getAppAccessToken" in url:
++                return httpx.Response(200, json={"access_token": "test"})
++            sent.append(kwargs["json"])
++            return httpx.Response(200, json={"id": "test"})
++    monkeypatch.setattr(httpx, "AsyncClient", Client)
++    cfg = SimpleNamespace(extra={"app_id":"test", "client_secret":"test", "compact_mobile":True}, token="")
++    message = "[文档](https://www.spacemit.com/community)"
++    result = await _send_qqbot(cfg, "test", message)
++    assert result["success"]
++    assert sent[0]["markdown"]["content"] == mobile_markdown(message)
++
++
++@pytest.mark.asyncio
++async def test_standalone_rich_markdown_keeps_supported_format_and_headers(monkeypatch):
++    import httpx
++    from tools.send_message_tool import _send_qqbot
++    from types import SimpleNamespace
++
++    sent = []
++
++    class Client:
++        def __init__(self, **kwargs):
++            pass
++
++        async def __aenter__(self):
++            return self
++
++        async def __aexit__(self, *args):
++            pass
++
++        async def post(self, url, **kwargs):
++            if "getAppAccessToken" in url:
++                return httpx.Response(200, json={"access_token": "test"})
++            sent.append(kwargs)
++            return httpx.Response(200, json={"id": "test"})
++
++    monkeypatch.setattr(httpx, "AsyncClient", Client)
++    cfg = SimpleNamespace(
++        extra={"app_id": "test", "client_secret": "test", "compact_mobile": False},
++        token="",
++    )
++    message = "## 🧪 标题\n\n**结论**\n\n1. 第一步"
++    result = await _send_qqbot(cfg, "test", message)
++
++    assert result["success"]
++    assert sent[0]["json"]["markdown"]["content"] == format_qq_markdown(message)
++    assert sent[0]["headers"]["Accept"] == "application/json"
++    assert sent[0]["headers"]["User-Agent"].startswith("QQBotAdapter/")
++
++
++def test_default_workflow_unchanged():
++    a = adapter()
++    assert a.format_message("`echo hi`") == "`echo hi`"
++    assert a.format_message("[说明](https://www.spacemit.com/community)").startswith("[说明]")
++
++
++def test_rich_formatter_is_shared_and_preserves_supported_markdown():
++    content = "**结论**\n步骤如下：\n1. **第一项**\n> ⚠️ 注意事项"
++    expected = "## 结论\n步骤如下：\n\n1. **第一项**\n> ⚠️ 注意事项"
++
++    assert format_qq_markdown(content) == expected
++    assert adapter(compact_mobile=False).format_message(content) == expected
++
++
++@pytest.mark.asyncio
++async def test_actual_gateway_send_uses_mobile_formatter():
++    a = adapter(compact_mobile=True)
++    a._connected = True
++    a._wait_for_reconnection = AsyncMock(return_value=True)
++    from gateway.platforms.base import SendResult
++    a._send_chunk = AsyncMock(return_value=SendResult(success=True))
++    result = await a.send("test", "1. 运行 `ollama list`。\n[文档](https://www.spacemit.com/community)")
++    assert result.success
++    text = a._send_chunk.call_args.args[1]
++    assert text.startswith("1、") and "[🔗文档]" in text
++    payload = a._build_text_body(text, None)
++    assert payload["msg_type"] == 2
++    assert payload["markdown"]["content"] == text

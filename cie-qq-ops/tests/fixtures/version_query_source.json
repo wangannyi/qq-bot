@@ -1,0 +1,11 @@
+{
+  "id": "synthetic",
+  "path": "software/SDK/bianbu/development/rt-linux_guide.md",
+  "title": "RT-Linux 合成查询",
+  "heading": "RT-Linux 合成查询",
+  "content": "# 合成内核查询 fixture\n本指南介绍如何在 Bianbu（K3 平台）上安装、切换并测试 PREEMPT_RT 实时内核（RT-Linux）。\n## 验证当前内核版本\n```sh\nuname -r\n```\n这里只验证查询动作，不包含任何实际内核输出。",
+  "page_url": "https://example.invalid/docs/software/SDK/bianbu/development/rt-linux_guide.md",
+  "source_kind": "official",
+  "verified": true,
+  "fixture_origin": "new synthetic data; not an official document or a real response"
+}

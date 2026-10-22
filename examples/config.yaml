@@ -1,0 +1,35 @@
+# Blank Hermes profile. Configure your provider and allowlists before enabling QQ.
+model:
+  provider: custom:example
+  default: REPLACE_WITH_MODEL_ID
+custom_providers:
+  - name: example
+    base_url: https://example.invalid/v1
+    key_env: QQ_BOT_MODEL_API_KEY
+    api_mode: chat_completions
+cie_support:
+  answer_backend: independent
+  summary_transport: chat_completions
+  supplemental_search: false
+  model_api_key_env: QQ_BOT_MODEL_API_KEY
+plugins:
+  enabled: [cie-answer-policy]
+group_sessions_per_user: true
+max_concurrent_sessions: 3
+platforms:
+  qqbot:
+    enabled: false
+    gateway_restart_notification: false
+    extra:
+      app_id: ''
+      client_secret: ''
+      markdown_support: true
+      compact_mobile: false
+      dm_policy: disabled
+      group_policy: allowlist
+      group_allow_from: []
+      allow_from: []
+quick_commands: {}
+mcp_servers: {}
+platform_toolsets:
+  qqbot: []

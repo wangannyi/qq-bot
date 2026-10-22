@@ -1,0 +1,54 @@
+{
+  "fixture_origin": "synthetic",
+  "question": "K1 ROS2相机话题存在但无图像，需要检查什么？",
+  "sources": [
+    {
+      "id": "synthetic",
+      "path": "software/SDK/ros/k1/06_Robot_development/6.2_ROS2_API/6.2.1_Camera_System/2_ROS_Camera_Coding.md",
+      "title": "合成测试章节",
+      "heading": "合成测试章节",
+      "content": "ROS2 MIPI Camera 合成API测试片段。\n打开 V4L2 设备采集 NV12 帧，发布到 `/camera_frames`\n字段：width/height/stride/pix_format/is_dma/dma_fd/data\n确认 `vo_node` 订阅的是 `/camera_frames`，并与 `camera_node` 的分辨率/格式匹配。",
+      "page_url": "https://example.invalid/docs/software/SDK/ros/k1/06_Robot_development/6.2_ROS2_API/6.2.1_Camera_System/2_ROS_Camera_Coding.md",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    },
+    {
+      "id": "synthetic",
+      "path": "software/SDK/ros/k1/06_Robot_development/6.1_OS_Preparation/6.1.2_ROS2_Installation.md",
+      "title": "合成测试章节",
+      "heading": "合成测试章节",
+      "content": "合成USB测试片段。\n确保主机已安装 ROS2 Humble，使用 `rqt_image_view` 工具订阅 USB 相机采集的图像：\n示例话题是 /image_raw。",
+      "page_url": "https://example.invalid/docs/software/SDK/ros/k1/06_Robot_development/6.1_OS_Preparation/6.1.2_ROS2_Installation.md",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    }
+  ],
+  "structured_answer": {
+    "status": "answered",
+    "conclusion": {
+      "text": "话题存在但无图像说明采集失败。",
+      "command": "",
+      "evidence": [
+        {
+          "source_id": 0,
+          "quote": "ROS2 MIPI Camera 合成API测试片段。"
+        }
+      ]
+    },
+    "points": [
+      {
+        "text": "检查 /camera_frames 的消息结构。",
+        "command": "",
+        "evidence": [
+          {
+            "source_id": 0,
+            "quote": "width/height/stride/pix_format/is_dma/dma_fd/data"
+          }
+        ]
+      }
+    ],
+    "follow_up": ""
+  }
+}

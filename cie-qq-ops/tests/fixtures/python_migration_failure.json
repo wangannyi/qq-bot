@@ -1,0 +1,43 @@
+{
+  "fixture_origin": "synthetic",
+  "question": "x86的Python虚拟环境复制到K1后能直接运行吗？",
+  "sources": [
+    {
+      "id": "synthetic",
+      "path": "software/SDK/bianbu/development/python.md",
+      "title": "合成测试章节",
+      "heading": "合成测试章节",
+      "content": "合成环境案例。创建虚拟环境，使用pip包管理工具安装软件包。\n```sh\nsudo apt install python3-virtualenv\nvirtualenv myenv\nsource myenv/bin/activate\n```",
+      "page_url": "https://example.invalid/docs/software/SDK/bianbu/development/python.md",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    }
+  ],
+  "structured_answer": {
+    "status": "partial",
+    "conclusion": {
+      "text": "目标环境可以重新创建，具体复制兼容性未知。",
+      "command": "",
+      "evidence": [
+        {
+          "source_id": 0,
+          "quote": "创建虚拟环境，使用pip包管理工具安装软件包。"
+        }
+      ]
+    },
+    "points": [
+      {
+        "text": "重建虚拟环境后激活。",
+        "command": "source myenv/bin/activate",
+        "evidence": [
+          {
+            "source_id": 0,
+            "quote": "source myenv/bin/activate"
+          }
+        ]
+      }
+    ],
+    "follow_up": "合成案例尚需用户环境。"
+  }
+}

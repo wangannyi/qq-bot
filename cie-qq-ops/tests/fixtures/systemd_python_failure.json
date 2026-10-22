@@ -1,0 +1,43 @@
+{
+  "fixture_origin": "synthetic",
+  "question": "Bianbu Python脚本在systemd找不到依赖，需要核对什么？",
+  "sources": [
+    {
+      "id": "synthetic",
+      "path": "software/SDK/ros/k1/02_System_configuration/2.7_Automatic_Startup.md",
+      "title": "合成测试章节",
+      "heading": "合成测试章节",
+      "content": "合成服务配置章节：以 systemd 用户服务为例，适用于 bianbu 系统。\n`WorkingDirectory` 填写你的工作目录路径。\n`ExecStart` 填写你的启动命令或可执行文件路径。\n如需设置环境变量，可在 `Environment` 行添加。\n日志可通过 `journalctl --user -u demo.service` 查看。\n```ini\nEnvironment=PYTHONPATH=/if/you/need\n```",
+      "page_url": "https://example.invalid/docs/software/SDK/ros/k1/02_System_configuration/2.7_Automatic_Startup",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    },
+    {
+      "id": "synthetic",
+      "path": "software/SDK/bianbu/system_integration/bianbu_2.0_rootfs_create.md",
+      "title": "合成测试章节",
+      "heading": "合成测试章节",
+      "content": "合成无关的构建目录描述。",
+      "page_url": "https://example.invalid/docs/software/SDK/bianbu/system_integration/bianbu_2.0_rootfs_create.md",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    }
+  ],
+  "structured_answer": {
+    "status": "answered",
+    "conclusion": {
+      "text": "缺失依赖通常是环境变量未设置。",
+      "command": "",
+      "evidence": [
+        {
+          "source_id": 0,
+          "quote": "Environment=PYTHONPATH=/if/you/need"
+        }
+      ]
+    },
+    "points": [],
+    "follow_up": ""
+  }
+}

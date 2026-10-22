@@ -1,0 +1,38 @@
+[
+  {
+    "id": "synthetic_unused",
+    "fixture_origin": "synthetic",
+    "question": "如何确认手册版本？",
+    "sources": []
+  },
+  {
+    "id": "random_python_8",
+    "fixture_origin": "synthetic",
+    "question": "Bianbu如何指定Python解释器执行pip？",
+    "sources": []
+  },
+  {
+    "id": "random_camera_10",
+    "fixture_origin": "synthetic",
+    "question": "K1 USB相机黑屏，需要收集哪些采集参数？",
+    "sources": [
+      {
+        "id": "synthetic",
+        "path": "software/SDK/ros/k1/06_Robot_development/6.2_ROS2_API/6.2.1_Camera_System/1_USB_Camera_Node.md",
+        "title": "合成测试章节",
+        "heading": "合成测试章节",
+        "content": "合成参数表（不代表实际设备默认值）\n| video_device | synthetic value |\n| image_width | synthetic value |\n| image_height | synthetic value |\n| pixel_format | synthetic value |\n| framerate | synthetic value |\n| io_method | synthetic value |\n| autoexposure | synthetic value |\n| exposure | synthetic value |\n| gain | synthetic value |\n| auto_white_balance | synthetic value |\n| white_balance | synthetic value |",
+        "page_url": "https://example.invalid/docs/software/SDK/ros/k1/06_Robot_development/6.2_ROS2_API/6.2.1_Camera_System/1_USB_Camera_Node.md",
+        "source_kind": "official",
+        "verified": true,
+        "fixture_origin": "new synthetic data; not an official document or a real response"
+      }
+    ]
+  },
+  {
+    "id": "random_packages_8",
+    "fixture_origin": "synthetic",
+    "question": "Bianbu pip与uv的软件源配置能否共用，分别检查哪里？",
+    "sources": []
+  }
+]

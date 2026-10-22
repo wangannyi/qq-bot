@@ -1,0 +1,59 @@
+{
+  "repository": "https://github.com/NousResearch/hermes-agent.git",
+  "commit": "226e8de827a669e8ffa7035b27d70c19e44b1208",
+  "version": "0.18.2",
+  "python": ">=3.11,<3.14",
+  "patch": "hermes-qq.patch",
+  "excluded_local_change": "package-lock.json (unrelated npm lock deletion)",
+  "upstream_hooks": [
+    "pre_llm_call",
+    "transform_llm_output",
+    "post_tool_call",
+    "register_middleware"
+  ],
+  "patch_features": [
+    "QQ rich/compact presentation and source links",
+    "plain-language daily command routing",
+    "full-group addressed message handling",
+    "gateway listener liveness, bounded WebSocket close and ACK recovery",
+    "explicit QQ OpenID direct-send target parsing and Markdown delivery"
+  ],
+  "files": {
+    "gateway/platforms/qqbot/__init__.py": {
+      "upstream": "3bcfe7617f1f468f67bb1122692443030f9f9a70e2e1cbf42ff5afe42fad9977",
+      "patched": "55f09310df6aa3faea9c12cab72b7fc0d02a4c6233c60b444c71c2a9e9ca0043"
+    },
+    "gateway/platforms/qqbot/adapter.py": {
+      "upstream": "c099529053cd3e9377db4053591d6d302c2ce7797da8053ecd41345476e3b448",
+      "patched": "4003bc6c51c0574eb64f87604b2576610ba70fb8e6afe95db5b679d6f906d33c"
+    },
+    "gateway/platforms/qqbot/constants.py": {
+      "upstream": "5d336eebdfb714cb4dbf7e06f3546bca77a731ff217d92f886a9330e854cc470",
+      "patched": "82e4c9ddfd100d13b027ac38143a86a04a6679f3a373f599c57ca8b605da700d"
+    },
+    "gateway/platforms/qqbot/keyboards.py": {
+      "upstream": "b13abca48375c9657a889a224af0d9a439552a332b5e3222c42cddb6af8e0ab5",
+      "patched": "0c2a0b3ab21b2b8af0708dd619cb4c371deb78d3c6445d9d9c97581022f2e454"
+    },
+    "tools/send_message_tool.py": {
+      "upstream": "a1cb0e4469a50601cfd91b5fa0eb0fa92ad0250f483d3ae00e7162082aa2bf77",
+      "patched": "64a259cbda2814a4d076e2ecfa4fdf2bfb076e831901d3838d3551d76e99d368"
+    },
+    "tests/gateway/test_qqbot.py": {
+      "upstream": "bd45458ab48085b674657d78e54c86f19449c8efb32999725d19678c4505f052",
+      "patched": "6f19002e2a4e89bd008de7dcaa738f283e89fba578b3232806e03cdc5592b360"
+    },
+    "tests/tools/test_send_message_target_parse.py": {
+      "upstream": "13131ad09cb195932e5ad75986281d043a655b7512721ab90edefca313365a6c",
+      "patched": "691b2393ceb0ef683c0f4b6efc334cbe6a861735d0708721bf59f86a3f9e624d"
+    },
+    "gateway/platforms/qqbot/mobile_format.py": {
+      "upstream": null,
+      "patched": "f2866885728342c9e1528269ccc5da193e0a2393f45636602dcefc11fa0238cb"
+    },
+    "tests/gateway/test_qq_mobile_format.py": {
+      "upstream": null,
+      "patched": "cede5b1bbd157942aa77af6639ddb7ace61db3fa153e5f17a8f098118b8ae295"
+    }
+  }
+}

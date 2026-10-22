@@ -1,0 +1,3 @@
+-r ../requirements.txt
+# Only needed for the optional standalone official-QQ SDK command.
+qq-botpy==1.2.1

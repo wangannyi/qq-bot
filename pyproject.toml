@@ -1,0 +1,19 @@
+[project]
+name = "spacemit-qq-support"
+version = "0.1.0"
+description = "Source-grounded QQ technical support through a pinned Hermes integration"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+
+[tool.pytest.ini_options]
+pythonpath = ["cie-qq-ops", "qq-support-bot"]
+testpaths = ["cie-qq-ops/tests", "qq-support-bot/tests", "tests"]
+markers = ["hermes: requires the explicitly configured patched Hermes checkout"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "patches", "vendor"]
+
+[tool.ruff.lint]
+select = ["F", "E9", "I"]

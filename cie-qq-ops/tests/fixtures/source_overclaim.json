@@ -1,0 +1,49 @@
+[
+  {
+    "id": "random_competition_17",
+    "fixture_origin": "synthetic",
+    "question": "CIE赛题2云端推理与本地推理有哪些限制？",
+    "sources": [
+      {
+        "id": "synthetic",
+        "path": "event/cie-2026/rules",
+        "title": "合成测试章节",
+        "heading": "合成测试章节",
+        "content": "赛题2：合成规则\n演示需要同时检查 Qwen3.5-2B-Instruct 与 Qwen3.5-4B-Instruct。\n本合成赛题设定：不依赖云端API，在本地推理。\n演示选项：K1 开发板或申请8G实例。",
+        "page_url": "https://example.invalid/docs/event/cie-2026/rules",
+        "source_kind": "event_rules",
+        "verified": true,
+        "fixture_origin": "new synthetic data; not an official document or a real response"
+      }
+    ]
+  },
+  {
+    "id": "random_camera_14",
+    "fixture_origin": "synthetic",
+    "question": "K1 USB相机设备编号改变，如何避免固定编号？",
+    "sources": [
+      {
+        "id": "synthetic",
+        "path": "software/SDK/ros/k1/06_Robot_development/6.2_ROS2_API/6.2.1_Camera_System/1_USB_Camera_Node.md",
+        "title": "合成测试章节",
+        "heading": "合成测试章节",
+        "content": "合成设备命名测试。插拔或顺序变化会导致 `/dev/videoX` 号变化。使用 `udev` 基于序列号或 USB 路径创建持久命名。",
+        "page_url": "https://example.invalid/docs/software/SDK/ros/k1/06_Robot_development/6.2_ROS2_API/6.2.1_Camera_System/1_USB_Camera_Node.md",
+        "source_kind": "official",
+        "verified": true,
+        "fixture_origin": "new synthetic data; not an official document or a real response"
+      },
+      {
+        "id": "synthetic",
+        "path": "software/SDK/ros/k1/03_Basic_applications/3.1_Image_Capture_and_Applications/3.1.3_USB_Camera_Python_Usage.md",
+        "title": "合成测试章节",
+        "heading": "合成测试章节",
+        "content": "合成应用片段，VideoCapture 完整路径不等于持久命名。",
+        "page_url": "https://example.invalid/docs/software/SDK/ros/k1/03_Basic_applications/3.1_Image_Capture_and_Applications/3.1.3_USB_Camera_Python_Usage.md",
+        "source_kind": "official",
+        "verified": true,
+        "fixture_origin": "new synthetic data; not an official document or a real response"
+      }
+    ]
+  }
+]

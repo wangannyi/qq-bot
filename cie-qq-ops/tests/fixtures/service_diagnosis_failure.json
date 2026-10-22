@@ -1,0 +1,64 @@
+{
+  "fixture_origin": "synthetic",
+  "question": "K3本地模型服务如何区分服务未启动与请求格式错误？",
+  "sources": [
+    {
+      "id": "synthetic",
+      "path": "ai/solutions/aicomputer_solution/seewise.md",
+      "title": "Synthetic ASR component",
+      "heading": "合成测试章节",
+      "content": "合成组件诊断例：Qwen3-ASR 请求异常可能与进程状态或 endpoint 设置有关；不能仅凭异常确定原因。\nFun-ASR 示例使用 alias funasr 和专用转写接口；与其他服务的适用范围不同。",
+      "page_url": "https://example.invalid/docs/ai/solutions/aicomputer_solution/seewise.md",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    },
+    {
+      "id": "synthetic",
+      "path": "software/SDK/ros/k3/04-AI与算法/4.1-语音/4.1.1-ASR.md",
+      "title": "合成测试章节",
+      "heading": "合成测试章节",
+      "content": "合成组件诊断例：Qwen3-ASR 请求异常可能与进程状态或 endpoint 设置有关；不能仅凭异常确定原因。\nFun-ASR 示例使用 alias funasr 和专用转写接口；与其他服务的适用范围不同。",
+      "page_url": "https://example.invalid/docs/software/SDK/ros/k3/04-AI与算法/4.1-语音/4.1.1-ASR.md",
+      "source_kind": "official",
+      "verified": true,
+      "fixture_origin": "new synthetic data; not an official document or a real response"
+    }
+  ],
+  "answer": {
+    "status": "answered",
+    "conclusion": {
+      "text": "下面给出通用服务诊断。",
+      "command": "",
+      "evidence": [
+        {
+          "source_id": 0,
+          "quote": "合成组件诊断例：Qwen3-ASR 请求异常可能与进程状态或 endpoint 设置有关；不能仅凭异常确定原因。"
+        }
+      ]
+    },
+    "points": [
+      {
+        "text": "健康检查返回异常即服务未起。",
+        "command": "",
+        "evidence": [
+          {
+            "source_id": 0,
+            "quote": "合成组件诊断例：Qwen3-ASR 请求异常可能与进程状态或 endpoint 设置有关；不能仅凭异常确定原因。"
+          }
+        ]
+      },
+      {
+        "text": "检查 Fun-ASR 的配置。",
+        "command": "",
+        "evidence": [
+          {
+            "source_id": 0,
+            "quote": "Fun-ASR 示例使用 alias funasr 和专用转写接口；与其他服务的适用范围不同。"
+          }
+        ]
+      }
+    ],
+    "follow_up": ""
+  }
+}

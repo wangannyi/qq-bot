@@ -1,0 +1,5 @@
+{
+  "models": "REPLACE with the exact model-requirement clause from your authorized rules",
+  "inference": "REPLACE with the exact inference-scope clause from your authorized rules",
+  "deployment": "REPLACE with the exact deployment clause from your authorized rules"
+}
